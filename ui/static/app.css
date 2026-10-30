@@ -1,0 +1,43 @@
+:root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#6aa9ff;
+        --ok:#3fb950; --warn:#d29922; --bad:#f85149; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+@media (prefers-color-scheme: light) {
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#d8dce3; --text:#1b1f27; --muted:#5b6575; --accent:#1d5fd0; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }
+header { display:flex; align-items:center; gap:16px; padding:10px 20px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+header[hidden] { display:none; }
+.brand { letter-spacing:.04em; }
+nav { display:flex; gap:4px; }
+nav a { color:var(--muted); text-decoration:none; padding:6px 12px; border-radius:6px; }
+nav a.active, nav a:hover { color:var(--text); background:var(--bg); }
+.spacer { flex:1; }
+main { padding:20px; max-width:1200px; margin:0 auto; }
+h2 { margin:0 0 12px; font-size:18px; } h3 { margin:18px 0 8px; font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+dl { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin:0; } dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
+table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+tr.clickable { cursor:pointer; } tr.clickable:hover, tr.selected { background:var(--bg); }
+input, select, textarea, button { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+textarea { width:100%; font-family:var(--mono); font-size:13px; resize:vertical; min-height:120px; }
+textarea.code { min-height:300px; tab-size:2; white-space:pre; }
+button { cursor:pointer; } button:hover:not(:disabled) { border-color:var(--accent); } button:disabled { opacity:.5; cursor:default; }
+button.primary { background:var(--accent); color:#fff; border-color:var(--accent); } button.danger { border-color:var(--bad); color:var(--bad); }
+button.link { border:none; background:none; color:var(--accent); padding:0 4px; }
+pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; max-height:360px; margin:6px 0; font:12px/1.4 var(--mono); white-space:pre-wrap; word-break:break-word; }
+code, .mono { font-family:var(--mono); font-size:12px; }
+.badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; border:1px solid var(--line); }
+.badge.ok { color:var(--ok); border-color:var(--ok); } .badge.bad { color:var(--bad); border-color:var(--bad); } .badge.warn { color:var(--warn); border-color:var(--warn); }
+.muted { color:var(--muted); } .error { color:var(--bad); }
+#notices { position:fixed; right:16px; bottom:16px; z-index:20; display:flex; flex-direction:column; gap:8px; max-width:520px; }
+.notice { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:6px; padding:10px 14px; display:flex; gap:12px; align-items:flex-start; }
+.notice.error { border-left-color:var(--bad); color:var(--text); } .notice.ok { border-left-color:var(--ok); }
+.overlay { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; z-index:30; }
+.overlay[hidden] { display:none; } .overlay form { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:28px; width:340px; display:flex; flex-direction:column; gap:12px; }
+.overlay h1 { margin:0; } .overlay p { margin:0; color:var(--muted); }
+.cols { display:grid; grid-template-columns:260px 1fr; gap:16px; } @media (max-width:800px) { .cols { grid-template-columns:1fr; } }
+.list { display:flex; flex-direction:column; gap:4px; } .list button { text-align:left; } .list button.active { border-color:var(--accent); }
+details > summary { cursor:pointer; color:var(--muted); }

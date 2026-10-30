@@ -1,0 +1,158 @@
+package stepwise:hook@0.1.0;
+
+/// Data exchanged with a hook. Bodies, identity and state are JSON *text*: language-neutral,
+/// and the host validates them against the OpenAPI schemas before and after the call.
+interface types {
+    record kv {
+        name: string,
+        value: string,
+    }
+
+    /// The response being built; at `post_process` this is what `execute` produced.
+    record response-draft {
+        status: u16,
+        headers: list<kv>,
+        /// JSON text
+        body: option<string>,
+    }
+
+    record context {
+        request-id: string,
+        /// Stable route id, e.g. "POST /pets".
+        route-id: string,
+        /// Which step this call is for: "pre_process", "post_process", ...
+        step: string,
+        method: string,
+        path: string,
+        path-params: list<kv>,
+        query: list<kv>,
+        /// Lower-cased header names.
+        headers: list<kv>,
+        /// Parsed request body as JSON text, if the request had one.
+        request-body: option<string>,
+        /// `{"subject": "...", "roles": [...]}` as JSON text, if authenticated.
+        identity: option<string>,
+        /// JSON object text; scratch state shared by all hooks of one request.
+        state: string,
+        response: response-draft,
+    }
+
+    /// Changes to apply and carry on. Anything left `none` is untouched.
+    record patch {
+        state: option<string>,
+        request-body: option<string>,
+        response-status: option<u16>,
+        response-headers: option<list<kv>>,
+        response-body: option<string>,
+    }
+
+    /// Stop the pipeline and send this response as-is.
+    record response {
+        status: u16,
+        headers: list<kv>,
+        body: option<string>,
+    }
+
+    /// Stop the pipeline with an error (rendered as the standard error body).
+    record failure {
+        status: u16,
+        code: string,
+        message: string,
+        /// JSON text
+        details: option<string>,
+    }
+
+    variant outcome {
+        proceed(patch),
+        respond(response),
+        fail(failure),
+    }
+}
+
+/// Capabilities the host gives to hooks. Deliberately small; more (db, http, kv) are
+/// added as separate interfaces so existing hooks keep working.
+interface host {
+    enum level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+    log: func(level: level, message: string);
+}
+
+/// Database access for hooks. Documents are JSON text. Every call is checked against the
+/// collections granted to the route (`routes."<id>".db.grants`; the route's own CRUD collection
+/// is always granted). Calls to other collections return an error instead of data.
+interface db {
+    get: func(collection: string, id: string) -> result<option<string>, string>;
+    /// Equality filters on document fields; `limit` is capped at 1000.
+    find: func(collection: string, filters: list<tuple<string, string>>, limit: u32) -> result<list<string>, string>;
+    count: func(collection: string, filters: list<tuple<string, string>>) -> result<u64, string>;
+    /// `false` if the id already exists.
+    insert: func(collection: string, id: string, doc: string) -> result<bool, string>;
+    /// `false` if the document does not exist.
+    replace: func(collection: string, id: string, doc: string) -> result<bool, string>;
+    /// RFC 7396 merge patch; `none` if the document does not exist.
+    merge: func(collection: string, id: string, patch: string) -> result<option<string>, string>;
+    /// `false` if the document did not exist.
+    delete: func(collection: string, id: string) -> result<bool, string>;
+}
+
+/// Declarative reads, GraphQL-shaped: choose fields, follow relations, order and page, in one call.
+///
+/// ```json
+/// { "from": "orders", "where": { "status": { "in": ["open", "paid"] } },
+///   "select": ["id", "total",
+///     { "customer": { "from": "customers", "id": "customerId", "select": ["name"] } },
+///     { "items": { "from": "orderItems", "by": "orderId", "select": ["sku", "qty"] } }],
+///   "orderBy": [{ "createdAt": "desc" }], "limit": 20, "total": true }
+/// ```
+///
+/// Returns `{"data": [...], "total": n}` (or `{"data": {...} | null}` for a query by `id`).
+/// `by` = has-many (children whose `by` field equals this document's id); `id` = belongs-to (this
+/// document's field holding the other document's id). Relations configured under `relations:` can be
+/// referenced by name: `{ "items": "items" }`. Each relation costs one batched query per level
+/// regardless of how many rows there are. Every collection the query touches, including relation
+/// targets, must be readable by the route.
+interface query {
+    run: func(query: string) -> result<string, string>;
+}
+
+/// Declarative writes. A hook never writes directly: it *describes* writes and the host applies
+/// them atomically.
+///
+/// ```json
+/// { "op": "update", "collection": "products", "id": "sku-1",
+///   "inc": { "stock": -2 }, "require": { "stock": { "gte": 2 } },
+///   "onFail": { "status": 409, "code": "out_of_stock" } }
+/// ```
+///
+/// `op` is insert | update | replace | upsert | delete. Updates take merge / set / inc / push /
+/// unset; `require` holds conditions (eq ne gt gte lt lte in nin exists), `expectVersion` does
+/// optimistic concurrency, `ifMissing: "skip"` ignores missing documents.
+///
+/// Effects emitted before the route's own database operation run in the SAME transaction as it
+/// (all or nothing); a failing condition fails the request with `onFail` and writes nothing.
+/// Effects emitted afterwards (post_process) are applied once the response is decided, best effort.
+/// If the hook returns `fail`, nothing it emitted is applied.
+///
+/// The collection must be granted for writing (the route's own collection always is).
+interface effects {
+    /// Validate and queue one effect (JSON text). Returns an error for malformed effects or
+    /// collections the route may not write.
+    emit: func(effect: string) -> result<_, string>;
+}
+
+interface handler {
+    use types.{context, outcome};
+    handle: func(ctx: context) -> outcome;
+}
+
+world hook {
+    import host;
+    import db;
+    import effects;
+    import query;
+    export handler;
+}

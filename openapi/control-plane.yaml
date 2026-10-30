@@ -1,0 +1,1110 @@
+openapi: 3.0.3
+info:
+  title: Stepwise Control Plane API
+  version: 1.0.0
+  description: |
+    Management API for a Stepwise server, intended for a separate frontend container.
+
+    **Transport.** Served on its own listener (`control.host`/`control.port`, default
+    `127.0.0.1:9090`), never on the data-plane port. Enable `control.tls` and set
+    `control.tls.client_ca_path` to require mutual TLS from the frontend.
+
+    **Auth.** Every endpoint except `/health`, `/ready` and `/openapi.yaml` requires
+    `Authorization: Bearer <control.token>`. Repeated failures from one IP are rate limited (429).
+
+    **Config updates are transactional.** The candidate config is fully compiled (spec parsed,
+    schemas compiled, hooks bound) before anything is swapped or written. A rejected update
+    changes nothing. Each change in a response carries an `action`:
+
+    | action | meaning |
+    |---|---|
+    | `hot` | swapped in atomically; in-flight requests finish on the old config |
+    | `restart_data_listener` | data-plane listener drained gracefully and re-bound |
+    | `restart_control_listener` | this API's listener drained and re-bound (reconnect after) |
+    | `restart_process` | saved, but effective only after a process restart |
+
+    **Concurrency.** `GET /config` returns an `ETag`. Send it back as `If-Match` on `PUT /config`
+    to get `412` instead of overwriting someone else's edit.
+
+    **Secrets** are returned as `***`. Sending `***` back means "unchanged".
+servers:
+  - url: http://localhost:9090/api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+  - name: Config
+  - name: Introspection
+  - name: Database
+    description: Inspect, seed and reset the data behind the API.
+  - name: Builder
+    description: Compile TypeScript, JavaScript or Python hook source into components (needs a stepwise-builder).
+  - name: Scripts
+    description: WebAssembly hooks (business logic) — upload, version, alias, test.
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe (a valid runtime is loaded and the database, if enabled, answers)
+      security: []
+      responses:
+        "200":
+          description: Ready to serve
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Degraded (the database does not answer)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /status:
+    get:
+      tags: [Introspection]
+      summary: Server status
+      responses:
+        "200":
+          description: Current status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /config:
+    get:
+      tags: [Config]
+      summary: Current configuration (secrets redacted)
+      responses:
+        "200":
+          description: The active config and its version
+          headers:
+            ETag:
+              description: Quoted config version, for use with `If-Match`
+              schema: { type: string, example: '"3"' }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigDocument" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [Config]
+      summary: Replace the configuration
+      description: |
+        Body is the full config as JSON (same shape as the YAML file). With `dry_run=true`
+        the change is validated and diffed but nothing is applied or written.
+      parameters:
+        - name: dry_run
+          in: query
+          schema: { type: boolean, default: false }
+        - name: If-Match
+          in: header
+          description: Config version from a previous `ETag`
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: Full Stepwise configuration }
+      responses:
+        "200":
+          description: Applied (or validated, for dry runs)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplyReport" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "412":
+          description: Config changed since `If-Match` version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Config rejected; nothing was changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Could not persist the config file; nothing was changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /reload:
+    post:
+      tags: [Config]
+      summary: Re-read the config file and OpenAPI spec from disk
+      description: Use after editing the file or the OpenAPI document out-of-band (and to pick up changed `${ENV}` values).
+      parameters:
+        - name: dry_run
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Reloaded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplyReport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: File or spec invalid; nothing was changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /routes:
+    get:
+      tags: [Introspection]
+      summary: Compiled routes with their step plans
+      responses:
+        "200":
+          description: One entry per served operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  routes:
+                    type: array
+                    items: { $ref: "#/components/schemas/Route" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /hooks:
+    get:
+      tags: [Introspection]
+      summary: Hooks that routes can reference
+      responses:
+        "200":
+          description: Registered hook names
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hooks:
+                    type: array
+                    items: { type: string, example: "builtin:stamp" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /metrics:
+    get:
+      tags: [Introspection]
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /db/query:
+    post:
+      tags: [Database]
+      summary: Run a read query (GraphQL-shaped)
+      description: |
+        Choose fields, follow relations, filter, order and page in one request. Read-only, with
+        unrestricted access (route grants do not apply to the operator).
+
+        ```json
+        { "from": "orders", "where": { "status": { "in": ["open", "paid"] } },
+          "select": ["id", "total",
+            { "customer": { "from": "customers", "id": "customerId", "select": ["name"] } },
+            { "items": { "from": "orderItems", "by": "orderId", "select": ["sku", "qty"] } }],
+          "orderBy": [{ "createdAt": "desc" }], "limit": 20, "total": true }
+        ```
+
+        `by` is has-many (children whose `by` field equals the parent's id); `id` is belongs-to (the
+        parent's field holding the child's id). Relations configured under `relations:` can be used
+        by name (`{ "items": "items" }`). Each relation is one batched query per level. `where` takes
+        the same operators as effect conditions (eq ne gt gte lt lte in nin exists); plain equality
+        is evaluated by the database, anything else scans the collection (capped; `422 query_too_broad`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReadQuery" }
+      responses:
+        "200":
+          description: "`data` is an array, or one document / null for a query by `id`; `total` when requested"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {}
+                  total: { type: integer }
+        "400":
+          description: Malformed query (the message says what is wrong)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/DatabaseDisabled" }
+        "422":
+          description: Too broad (would examine or load more documents than the limits allow)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /db/collections:
+    get:
+      tags: [Database]
+      summary: List collections and their document counts
+      description: "Requires `database.enabled: true` (otherwise `409 database_disabled`)."
+      responses:
+        "200":
+          description: Collections
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collections:
+                    type: array
+                    items: { $ref: "#/components/schemas/CollectionInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/DatabaseDisabled" }
+  /db/collections/{name}:
+    parameters:
+      - $ref: "#/components/parameters/CollectionName"
+    delete:
+      tags: [Database]
+      summary: Delete every document in a collection (and reset its id sequence)
+      responses:
+        "200":
+          description: Cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collection: { type: string }
+                  deleted: { type: integer }
+        "400":
+          description: Bad collection name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/DatabaseDisabled" }
+  /db/collections/{name}/docs:
+    parameters:
+      - $ref: "#/components/parameters/CollectionName"
+    get:
+      tags: [Database]
+      summary: Browse documents
+      description: |
+        Any query parameter other than `limit`, `offset` and `sort` is an equality filter on that
+        document field (dot-separated for nested fields, e.g. `owner.name=ann`).
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: sort, in: query, schema: { type: string, example: "-name" }, description: Field name; prefix with `-` for descending }
+      responses:
+        "200":
+          description: A page of documents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collection: { type: string }
+                  total: { type: integer, description: Documents matching the filters }
+                  docs:
+                    type: array
+                    items: { type: object }
+        "400":
+          description: Bad query
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/DatabaseDisabled" }
+    post:
+      tags: [Database]
+      summary: Seed documents
+      description: |
+        Body is one object or an array. A missing id is generated the way the API itself would
+        (integer sequence or uuid, depending on the schema of the collection's endpoints).
+        Documents whose id already exists are skipped, so seeding is repeatable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { type: object }
+                - { type: array, items: { type: object } }
+      responses:
+        "201":
+          description: Seeded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collection: { type: string }
+                  inserted: { type: integer }
+                  skipped_existing: { type: integer }
+                  ids:
+                    type: array
+                    items: { type: string }
+        "400":
+          description: Bad body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/DatabaseDisabled" }
+  /builder:
+    get:
+      tags: [Builder]
+      summary: Is a builder configured and reachable, and what can it build?
+      description: Always answers 200; `enabled` is false when `wasm.builder.url` is not set.
+      responses:
+        "200":
+          description: Builder status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuilderStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /builder/templates/{language}:
+    parameters:
+      - $ref: "#/components/parameters/SourceLanguage"
+    get:
+      tags: [Builder]
+      summary: Starter source for a language (known to compile)
+      responses:
+        "200":
+          description: Template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceTemplate" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/BuilderDisabled" }
+        "502": { $ref: "#/components/responses/BuilderProblem" }
+  /builder/typings:
+    get:
+      tags: [Builder]
+      summary: TypeScript declarations for the hook interface (for editor autocompletion)
+      responses:
+        "200":
+          description: Map of file name to `.d.ts` text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: object
+                    additionalProperties: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/BuilderDisabled" }
+        "502": { $ref: "#/components/responses/BuilderProblem" }
+  /scripts/{name}/source:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+    post:
+      tags: [Builder, Scripts]
+      summary: Build a version from TypeScript, JavaScript or Python source
+      description: |
+        The source is compiled by the builder, then validated, precompiled and stored exactly like
+        an uploaded component, and the **source is kept with the version** (see
+        `GET /scripts/{name}/versions/{version}/source`). Submitting the same source with the same
+        language and backend again returns the existing version without rebuilding.
+
+        Compiler errors come back as `422 build_failed` with the compiler output in `error.details.log`.
+        With `dry_run=true` the source is built and validated but nothing is stored.
+      parameters:
+        - { name: dry_run, in: query, schema: { type: boolean, default: false } }
+        - { name: force, in: query, schema: { type: boolean, default: false }, description: Rebuild even if identical source was already built }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BuildSourceRequest" }
+      responses:
+        "201":
+          description: New version built
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildResult" }
+        "200":
+          description: Identical source already built (deduplicated), or a dry run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BuildResult" }
+        "400":
+          description: Bad request or invalid source (empty, too large, wrong backend)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/BuilderDisabled" }
+        "422":
+          description: "`build_failed` (compiler errors, missing `handler`) or `invalid_component`; nothing stored"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501":
+          description: The builder has no toolchain for that language
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/BuilderProblem" }
+        "503":
+          description: Builder busy; retry shortly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "504":
+          description: The build (or the builder) timed out
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /scripts/{name}/versions/{version}/source:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+      - $ref: "#/components/parameters/ScriptVersion"
+    get:
+      tags: [Builder, Scripts]
+      summary: The source a version was built from
+      responses:
+        "200":
+          description: Source and how it was built
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceDocument" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such script or version, or the version was uploaded as a compiled component (`no_source`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/WasmDisabled" }
+  /scripts:
+    get:
+      tags: [Scripts]
+      summary: List scripts
+      description: "Requires `wasm.enabled: true` (otherwise `409 wasm_disabled`)."
+      responses:
+        "200":
+          description: All scripts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scripts:
+                    type: array
+                    items: { $ref: "#/components/schemas/ScriptSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/WasmDisabled" }
+  /scripts/{name}:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+    get:
+      tags: [Scripts]
+      summary: One script with its versions, aliases and the routes that use it
+      responses:
+        "200":
+          description: The script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/WasmDisabled" }
+  /scripts/{name}/versions:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+    post:
+      tags: [Scripts]
+      summary: Upload a compiled component as the next version
+      description: |
+        Body is the raw component (`Content-Type: application/wasm`), built against
+        `wit/stepwise-hook.wit` with Rust (`cargo component`), JS/TS (`jco componentize`) or
+        Python (`componentize-py`). The upload is validated against the host contract
+        (imports satisfiable, `stepwise:hook/handler` exported) and compiled ahead of time.
+        Identical bytes return the existing version (`200`, `created: false`).
+
+        Pin it from a route as `wasm:<name>@<version>`.
+      parameters:
+        - { name: language, in: query, schema: { type: string, example: ts }, description: Informational }
+        - { name: note, in: query, schema: { type: string }, description: Free-text change note }
+      requestBody:
+        required: true
+        content:
+          application/wasm:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: New version created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadResult" }
+        "200":
+          description: These exact bytes were already uploaded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadResult" }
+        "400":
+          description: Bad name, or the body is not WebAssembly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/WasmDisabled" }
+        "413":
+          description: Larger than `wasm.max_upload_mb`
+        "422":
+          description: Not a valid component for this host (message says why); nothing stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /scripts/{name}/versions/{version}:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+      - $ref: "#/components/parameters/ScriptVersion"
+    delete:
+      tags: [Scripts]
+      summary: Delete a version
+      description: Refused (`409`) while an alias points at it or the active config uses it.
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { type: object, properties: { deleted: { $ref: "#/components/schemas/ScriptVersion" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: In use, or wasm disabled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /scripts/{name}/versions/{version}/test:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+      - $ref: "#/components/parameters/ScriptVersion"
+    post:
+      tags: [Scripts]
+      summary: Test a version against a fixture before binding it
+      description: |
+        Runs the hook in the real sandbox (same limits, same contract checks) in the context
+        of the route matching `request.method` + `request.path`. Nothing is bound or persisted.
+        `ok` is true for `ok`, `respond` and `fail` results (a deliberate business error is not
+        a defect); `trap`, `timeout`, `busy` and `contract` mean the hook is broken.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TestRequest" }
+            example:
+              step: pre_process
+              request: { method: POST, path: "/pets", body: { name: "  rex " } }
+              state: {}
+      responses:
+        "200":
+          description: Result of the run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestResult" }
+        "400":
+          description: Malformed test request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/WasmDisabled" }
+        "422":
+          description: No served route matches the request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /scripts/{name}/aliases/{alias}:
+    parameters:
+      - $ref: "#/components/parameters/ScriptName"
+      - { name: alias, in: path, required: true, schema: { type: string, example: live } }
+    put:
+      tags: [Scripts]
+      summary: Point an alias at a version (promote / roll back)
+      description: |
+        Routes that reference `wasm:<name>@<alias>` pick this up immediately: the runtime is
+        rebuilt with the same all-or-nothing guarantees as a config update, and the alias is put
+        back if the rebuild fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [version], properties: { version: { type: integer } } }
+      responses:
+        "200":
+          description: Alias moved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AliasResult" }
+        "400":
+          description: Bad body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/WasmDisabled" }
+        "422":
+          description: Unknown version, or the rebuild failed (alias reverted)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [Scripts]
+      summary: Remove an alias
+      responses:
+        "200":
+          description: Removed
+          content:
+            application/json:
+              schema: { type: object, properties: { deleted: { type: string } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Used by a route in the active config, or wasm disabled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /openapi.yaml:
+    get:
+      tags: [Introspection]
+      summary: This document
+      security: []
+      responses:
+        "200":
+          description: The control-plane OpenAPI document
+          content:
+            application/yaml:
+              schema: { type: string }
+components:
+  parameters:
+    SourceLanguage:
+      name: language
+      in: path
+      required: true
+      schema: { type: string, enum: [typescript, javascript, python, ts, js, py] }
+    CollectionName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$", example: pets }
+    ScriptName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,62}$", example: validate-pet }
+    ScriptVersion:
+      name: version
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    DatabaseDisabled:
+      description: The database is not enabled (`database.enabled`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such script, version or alias
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    WasmDisabled:
+      description: The WASM runtime is not enabled (`wasm.enabled`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid control token (`429` after repeated failures)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Body is not valid JSON
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: invalid_config }
+            message: { type: string }
+            details: {}
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+        config_version: { type: integer }
+        database: { type: string, enum: [ok, down, disabled] }
+    Listener:
+      type: object
+      properties:
+        addr: { type: string, example: "127.0.0.1:8080" }
+        tls: { type: boolean }
+        mtls: { type: boolean }
+    Status:
+      type: object
+      properties:
+        app_name: { type: string }
+        config_version: { type: integer }
+        uptime_seconds: { type: integer }
+        spec:
+          type: object
+          properties:
+            title: { type: string }
+            version: { type: string }
+            path: { type: string }
+        routes: { type: integer }
+        pending_process_restart:
+          type: array
+          items: { type: string }
+        listeners:
+          type: object
+          properties:
+            data_plane: { $ref: "#/components/schemas/Listener" }
+            control_plane: { $ref: "#/components/schemas/Listener" }
+    ConfigDocument:
+      type: object
+      properties:
+        version: { type: integer }
+        config: { type: object, description: The full config with secrets replaced by `***` }
+    Change:
+      type: object
+      properties:
+        path: { type: string, example: server.port }
+        action:
+          type: string
+          enum: [hot, restart_data_listener, restart_control_listener, restart_process]
+    ApplyReport:
+      type: object
+      properties:
+        applied: { type: boolean }
+        dry_run: { type: boolean }
+        version: { type: integer }
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/Change" }
+        restarts:
+          type: array
+          items: { type: string, enum: [data_plane, control_plane] }
+        pending_process_restart:
+          type: array
+          items: { type: string }
+        persisted: { type: boolean, description: Whether the config file was rewritten }
+        warnings:
+          type: array
+          items: { type: string }
+    BoundHook:
+      type: object
+      properties:
+        ref: { type: string, example: "wasm:validate-pet@live" }
+        pinned:
+          type: string
+          nullable: true
+          description: Artifact digest this reference resolved to when the runtime was built
+          example: "sha256:9f2c…"
+    Route:
+      type: object
+      properties:
+        id: { type: string, example: "GET /pets/{petId}" }
+        operation_id: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        protected: { type: boolean }
+        required_roles:
+          type: array
+          items: { type: string }
+        data_rules:
+          type: array
+          description: No-code data rules in effect on this route
+          items: { type: string, enum: [owner, timestamps, defaults, readonly, hide, soft_delete, effects, audit] }
+        crud:
+          type: object
+          nullable: true
+          description: The database operation `execute` performs for this route (null = mock response)
+          properties:
+            operation: { type: string, enum: [create, read, list, replace, merge, delete] }
+            collection: { type: string }
+        rate_limit: { type: object, nullable: true }
+        response_status: { type: integer }
+        steps:
+          type: object
+          description: Hooks bound per step (only steps that have hooks)
+          additionalProperties:
+            type: object
+            properties:
+              before: { type: array, items: { $ref: "#/components/schemas/BoundHook" } }
+              replace: { allOf: [{ $ref: "#/components/schemas/BoundHook" }], nullable: true }
+              after: { type: array, items: { $ref: "#/components/schemas/BoundHook" } }
+    ScriptVersion:
+      type: object
+      properties:
+        version: { type: integer }
+        digest: { type: string, example: "sha256:9f2c…" }
+        size: { type: integer }
+        language: { type: string }
+        note: { type: string }
+        created_at: { type: integer, description: Unix seconds }
+    ScriptSummary:
+      type: object
+      properties:
+        name: { type: string }
+        id: { type: string, example: scr_3fa91c20ab14, description: Stable unique id }
+        created_at: { type: integer }
+        versions: { type: integer }
+        latest_version: { type: integer, nullable: true }
+        language: { type: string, nullable: true }
+        aliases:
+          type: object
+          additionalProperties: { type: integer }
+        used_by: { type: integer, description: Number of hook slots in the active config that reference it }
+    ScriptDetail:
+      type: object
+      properties:
+        name: { type: string }
+        script:
+          type: object
+          properties:
+            id: { type: string }
+            created_at: { type: integer }
+            versions:
+              type: array
+              items: { $ref: "#/components/schemas/ScriptVersion" }
+            aliases:
+              type: object
+              additionalProperties: { type: integer }
+        used_by:
+          type: array
+          items:
+            type: object
+            properties:
+              route: { type: string, example: "POST /pets" }
+              step: { type: string, example: pre_process }
+              slot: { type: string, enum: [before, replace, after] }
+              ref: { type: string, example: "wasm:validate-pet@live" }
+    UploadResult:
+      type: object
+      properties:
+        name: { type: string }
+        script_id: { type: string }
+        version: { type: integer }
+        digest: { type: string }
+        size: { type: integer }
+        language: { type: string }
+        created: { type: boolean }
+        reference: { type: string, example: "wasm:validate-pet@3", description: Immutable pin to use in route config }
+    AliasResult:
+      type: object
+      properties:
+        name: { type: string }
+        alias: { type: string }
+        version: { type: integer }
+        previous: { type: integer, nullable: true }
+        applied:
+          nullable: true
+          description: Set when routes follow this alias and the runtime was rebuilt
+          type: object
+          properties:
+            config_version: { type: integer }
+    TestRequest:
+      type: object
+      required: [request]
+      properties:
+        step: { type: string, default: pre_process, enum: [rate_limit, authenticate, authorize, validate_request, pre_process, execute, post_process, validate_response] }
+        request:
+          type: object
+          required: [path]
+          properties:
+            method: { type: string, default: GET }
+            path: { type: string, description: "Path and query, e.g. /pets?limit=2" }
+            headers: { type: object, additionalProperties: { type: string } }
+            body: {}
+        state: { type: object }
+        identity:
+          type: object
+          nullable: true
+          properties:
+            subject: { type: string }
+            roles: { type: array, items: { type: string } }
+        response:
+          type: object
+          description: The response draft the hook sees (default is what `execute` would produce for the route)
+          properties:
+            status: { type: integer }
+            headers: { type: object, additionalProperties: { type: string } }
+            body: {}
+    TestResult:
+      type: object
+      properties:
+        reference: { type: string }
+        pinned: { type: string }
+        route: { type: string }
+        step: { type: string }
+        ok: { type: boolean }
+        result: { type: string, enum: [ok, respond, fail, timeout, trap, busy, contract] }
+        elapsed_ms: { type: number }
+        outcome:
+          type: object
+          properties:
+            kind: { type: string, enum: [continue, respond, fail] }
+            response: { nullable: true }
+            error: { nullable: true }
+        resulting:
+          type: object
+          description: The request/response state after the hook's changes were applied
+        contract:
+          type: object
+          properties:
+            response_valid: { type: boolean }
+            response_problems: { type: array, items: { type: string } }
+        effects:
+          type: object
+          description: |
+            Writes the hook queued with `effects.emit`. **Nothing was applied**: a test shows the plan, it
+            does not execute it. `in_transaction` effects would commit atomically with the route's own
+            write; `after_commit` effects would be applied once the response is decided.
+          properties:
+            in_transaction: { type: array, items: { $ref: "#/components/schemas/Effect" } }
+            after_commit: { type: array, items: { $ref: "#/components/schemas/Effect" } }
+        logs:
+          type: array
+          items:
+            type: object
+            properties:
+              level: { type: string, enum: [debug, info, warn, error, stdout, stderr] }
+              message: { type: string }
+        detail: { type: string, nullable: true, description: Internal diagnostics (trap message, contract problem) }
+    CollectionInfo:
+      type: object
+      properties:
+        name: { type: string }
+        count: { type: integer }
+    BuilderStatus:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        reachable: { type: boolean }
+        error: { type: string }
+        builder:
+          type: object
+          properties:
+            toolchains:
+              type: object
+              properties:
+                node: { type: string, nullable: true }
+                jco: { type: string, nullable: true }
+                componentize_py: { type: string, nullable: true }
+            languages:
+              type: array
+              items: { type: string }
+            backends: { type: object }
+            max_source_bytes: { type: integer }
+    SourceTemplate:
+      type: object
+      properties:
+        language: { type: string }
+        filename: { type: string, example: app.ts }
+        source: { type: string }
+    BuildSourceRequest:
+      type: object
+      required: [language, source]
+      properties:
+        language: { type: string, enum: [typescript, javascript, python, ts, js, py] }
+        source: { type: string }
+        backend:
+          type: string
+          enum: [qjs, spidermonkey]
+          description: JavaScript/TypeScript only. `qjs` (default) is small and fast to start; `spidermonkey` supports more of the language.
+        note: { type: string }
+    BuildResult:
+      type: object
+      properties:
+        name: { type: string }
+        script_id: { type: string }
+        version: { type: integer }
+        digest: { type: string }
+        size: { type: integer }
+        language: { type: string }
+        created: { type: boolean }
+        deduplicated: { type: boolean }
+        source_digest: { type: string }
+        reference: { type: string, example: "wasm:validate-pet@4" }
+        build:
+          type: object
+          properties:
+            duration_ms: { type: integer }
+            toolchain: { type: string }
+            log: { type: string }
+    SourceDocument:
+      type: object
+      properties:
+        name: { type: string }
+        version: { type: integer }
+        language: { type: string }
+        backend: { type: string, nullable: true }
+        toolchain: { type: string }
+        source_digest: { type: string }
+        source: { type: string }
+    Effect:
+      type: object
+      required: [op, collection]
+      description: A declarative write. See `wit/stepwise-hook.wit` (`effects.emit`).
+      properties:
+        op: { type: string, enum: [insert, update, replace, upsert, delete] }
+        collection: { type: string }
+        id: { type: string }
+        doc: { type: object }
+        merge: { type: object, description: RFC 7396 merge patch }
+        set: { type: object }
+        inc: { type: object, additionalProperties: { type: number } }
+        push: { type: object }
+        unset: { type: array, items: { type: string } }
+        require: { type: object, description: "Conditions on the current document: {field: value | {eq, ne, gt, gte, lt, lte, in, nin, exists}}" }
+        expectVersion: { type: integer }
+        onFail:
+          type: object
+          properties:
+            status: { type: integer }
+            code: { type: string }
+            message: { type: string }
+        ifMissing: { type: string, enum: [fail, skip] }
+    ReadQuery:
+      type: object
+      required: [from]
+      properties:
+        from: { type: string, description: Collection name }
+        id: { type: string, description: Fetch one document by id (then limit/offset/orderBy/total do not apply) }
+        where: { type: object, description: "{field: value | {eq, ne, gt, gte, lt, lte, in, nin, exists}}" }
+        select:
+          type: array
+          description: 'Field paths ("a.b"), "*", or a relation: {"name": {"from", "by"|"id", "select", "where", "orderBy", "limit"}} or {"name": "configuredRelation"}'
+          items: {}
+        orderBy:
+          type: array
+          description: '"field", "-field" or {"field": "asc"|"desc"}'
+          items: {}
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+        total: { type: boolean }

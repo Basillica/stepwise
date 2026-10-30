@@ -1,0 +1,43 @@
+# Stepwise inside the compose stack, PostgreSQL variant (use with compose.postgres.yaml). Secrets come from the environment (see compose.yaml).
+app_name: "Stepwise (compose)"
+
+server:
+  host: 0.0.0.0              # inside the container; publish the port deliberately
+  port: 8080
+
+control:
+  host: 0.0.0.0              # reachable by the UI container on the private network only
+  port: 9090
+  token: ${STEPWISE_CONTROL_TOKEN}
+  persist: true
+
+openapi:
+  spec_path: /etc/stepwise/api.yaml
+
+database:
+  enabled: true
+  db_type: postgres
+  url: ${DATABASE_URL}        # postgres://user:pass@postgres:5432/stepwise (add ?sslmode=require for TLS)
+  schema: public
+  pool_size: 8
+  # tls_ca_path: /etc/stepwise/db-ca.pem   # CA for the server certificate (TLS always verifies)
+
+wasm:
+  enabled: true
+  data_dir: /var/lib/stepwise/wasm
+  builder:
+    url: http://builder:7070   # plain HTTP on the private network
+    token: ${BUILDER_TOKEN}
+    timeout_secs: 300
+
+auth:
+  enabled: true
+  auth_type: token
+  use_openapi_security: true
+  token:
+    keys:
+      - { value: "${STEPWISE_API_KEY}", subject: demo, roles: [admin] }
+
+logging:
+  level: info
+  format: json

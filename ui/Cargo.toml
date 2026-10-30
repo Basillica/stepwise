@@ -1,0 +1,28 @@
+[package]
+name = "stepwise-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Management UI for Stepwise: static single-page app + an authenticating proxy to the control plane"
+
+[lib]
+name = "stepwise_ui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stepwise-ui"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }

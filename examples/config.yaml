@@ -1,0 +1,103 @@
+# Stepwise example configuration. Secrets come from the environment:
+#   export STEPWISE_CONTROL_TOKEN=$(openssl rand -hex 24)
+#   export STEPWISE_API_KEY=demo-key
+app_name: "Petstore mock"
+
+server:                    # data plane: the mocked API
+  host: 127.0.0.1
+  port: 8080
+  request_timeout_secs: 30
+  max_body_bytes: 1048576
+  trust_forwarded_for: false   # enable ONLY behind a proxy you control
+  cors:
+    allowed_origins: ["*"]
+  tls:                     # HTTPS; add client_ca_path to require client certificates (mTLS)
+    enabled: false
+    # cert_path: certs/server.pem
+    # key_path: certs/server-key.pem
+    # client_ca_path: certs/client-ca.pem
+    # require_client_cert: true
+
+control:                   # control plane: for your frontend container (see openapi/control-plane.yaml)
+  host: 127.0.0.1          # use 0.0.0.0 inside a container, and put it on a private network
+  port: 9090
+  token: ${STEPWISE_CONTROL_TOKEN}
+  persist: true            # write accepted changes back to this file
+  # tls: { enabled: true, cert_path: ..., key_path: ..., client_ca_path: ... }
+
+openapi:
+  spec_path: api.yaml
+  validation:
+    enabled: true
+    responses: warn        # off | warn | error
+  dynamic_responses:
+    enabled: true
+    array_items: 2
+
+auth:
+  enabled: true
+  auth_type: token         # token | basic | jwt
+  use_openapi_security: true   # operations with `security:` in the spec require auth
+  protected_routes: ["/pets"]
+  token:
+    source: header
+    name: Authorization    # `Bearer <key>` accepted
+    keys:
+      - { value: "${STEPWISE_API_KEY:-demo-key}", subject: demo, roles: [admin] }
+
+database:                  # every resource-shaped endpoint gets CRUD (see README)
+  enabled: true
+  db_type: sqlite          # sqlite | postgres
+  path: data/stepwise.db   # sqlite file, relative to this file
+  # --- PostgreSQL instead:
+  # db_type: postgres
+  # url: ${DATABASE_URL}   # postgres://user:pass@host:5432/db  (+ ?sslmode=require for TLS)
+  # schema: public         # created if missing; lets several instances share one database
+  # tls_ca_path: certs/db-ca.pem   # TLS always verifies the server certificate
+  # pool_size: 8
+
+wasm:                      # business logic as WebAssembly hooks (Rust, JS/TS, Python)
+  enabled: true
+  data_dir: data           # artifacts + script index
+  hook_timeout_ms: 500
+  max_memory_mb: 128
+  # builder:                 # compiles pasted TypeScript/JavaScript/Python source (see docker/compose.yaml)
+  #   url: http://127.0.0.1:7070    # plain HTTP: keep the builder on a private network
+  #   token: ${BUILDER_TOKEN}
+  #   timeout_secs: 300
+
+# relations for the read language (`POST /api/v1/db/query`, `query.run` in hooks), e.g.:
+# relations:
+#   pets: { owner: { from: owners, id: ownerId }, visits: { from: visits, by: petId } }
+
+rate_limit:
+  enabled: true
+  default: { requests: 120, per_seconds: 60, key: ip }
+
+security:
+  headers: true
+  hsts: true               # only sent when server.tls.enabled
+
+logging:
+  level: info              # hot-reloadable
+  format: pretty           # pretty | json   (changing needs a process restart)
+  access_log: true
+  step_trace_header: false # add x-stepwise-trace: per-step timings
+
+ignore_endpoints: []       # regexes against OpenAPI path templates
+
+routes:                    # per-operation behaviour: every endpoint is a state machine
+  "POST /pets":
+    rate_limit: { requests: 5, per_seconds: 10, key: ip }
+    require_roles: [admin]
+    steps:
+      post_process:
+        after: ["builtin:stamp"]
+      # pre_process:                       # a script from POST /api/v1/scripts/<name>/versions
+      #   before: ["wasm:validate-pet@3"]  # @3 pins a version; @live follows a movable alias
+    # data:                                # no-code rules, e.g. per-user data with soft delete and an audit trail
+    #   owner: ownerId
+    #   timestamps: { created: createdAt, updated: updatedAt }
+    #   soft_delete: deleted
+    #   audit: auditLog
+    # db: { grants: { audit: rw } }        # extra collections this route's hooks may touch

@@ -1,0 +1,7 @@
+{
+  "name": "stepwise-ui-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Drives the real UI (real app.js, real proxy, real server + builder) in jsdom. Run via run.sh.",
+  "devDependencies": { "jsdom": "^30.0.0" }
+}

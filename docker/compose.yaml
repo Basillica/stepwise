@@ -1,0 +1,54 @@
+# Run from the repository root:
+#   export STEPWISE_CONTROL_TOKEN=$(openssl rand -hex 24) BUILDER_TOKEN=$(openssl rand -hex 24) STEPWISE_API_KEY=$(openssl rand -hex 16) UI_TOKEN=$(openssl rand -hex 16)
+#   docker compose -f docker/compose.yaml up --build
+#
+# NOTE: written alongside the code but not run in the dev sandbox (no Docker there).
+services:
+  builder:
+    build: { context: .., dockerfile: docker/builder.Dockerfile }
+    environment:
+      BUILDER_TOKEN: ${BUILDER_TOKEN:?set BUILDER_TOKEN}
+      BUILDER_MAX_CONCURRENT: "2"
+    networks: [build-net]            # internal network: the builder has no route to the internet
+    read_only: true
+    tmpfs: ["/tmp:size=2g"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 4g                    # building executes user code (inside Wasm): cap it
+    cpus: 2
+
+  stepwise:
+    build: { context: .., dockerfile: docker/stepwise.Dockerfile }
+    environment:
+      STEPWISE_CONTROL_TOKEN: ${STEPWISE_CONTROL_TOKEN:?set STEPWISE_CONTROL_TOKEN}
+      BUILDER_TOKEN: ${BUILDER_TOKEN:?set BUILDER_TOKEN}
+      STEPWISE_API_KEY: ${STEPWISE_API_KEY:?set STEPWISE_API_KEY}
+    volumes:
+      - ./config.yaml:/etc/stepwise/config.yaml     # writable: accepted config changes are persisted here
+      - ../examples/api.yaml:/etc/stepwise/api.yaml:ro
+      - stepwise-data:/var/lib/stepwise
+    ports:
+      - "8080:8080"                  # data plane
+      - "127.0.0.1:9090:9090"        # control plane: localhost only; put your UI on the same network instead
+    networks: [build-net, default]
+    depends_on: [builder]
+
+  ui:                                # management UI: static app + proxy that holds the control token
+    build: { context: .., dockerfile: docker/ui.Dockerfile }
+    environment:
+      STEPWISE_CONTROL_URL: http://stepwise:9090
+      STEPWISE_CONTROL_TOKEN: ${STEPWISE_CONTROL_TOKEN:?set STEPWISE_CONTROL_TOKEN}
+      UI_TOKEN: ${UI_TOKEN:?set UI_TOKEN (what you type to sign in; 16+ characters)}
+    ports:
+      - "127.0.0.1:8081:8081"        # open http://localhost:8081
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on: [stepwise]
+
+networks:
+  build-net:
+    internal: true
+
+volumes:
+  stepwise-data:

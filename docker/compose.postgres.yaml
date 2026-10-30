@@ -1,0 +1,31 @@
+# Adds PostgreSQL to the stack and points Stepwise at it:
+#   export POSTGRES_PASSWORD=$(openssl rand -hex 16)
+#   docker compose -f docker/compose.yaml -f docker/compose.postgres.yaml up --build
+#
+# NOTE: written alongside the code but not run in the dev sandbox (no Docker there).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: stepwise
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stepwise"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    # not published: only the stepwise container can reach it
+
+  stepwise:
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/stepwise
+    volumes:
+      - ./config.postgres.yaml:/etc/stepwise/config.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

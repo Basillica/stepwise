@@ -1,0 +1,39 @@
+# Stepwise inside the compose stack. Secrets come from the environment (see compose.yaml).
+app_name: "Stepwise (compose)"
+
+server:
+  host: 0.0.0.0              # inside the container; publish the port deliberately
+  port: 8080
+
+control:
+  host: 0.0.0.0              # reachable by the UI container on the private network only
+  port: 9090
+  token: ${STEPWISE_CONTROL_TOKEN}
+  persist: true
+
+openapi:
+  spec_path: /etc/stepwise/api.yaml
+
+database:
+  enabled: true
+  path: /var/lib/stepwise/stepwise.db
+
+wasm:
+  enabled: true
+  data_dir: /var/lib/stepwise/wasm
+  builder:
+    url: http://builder:7070   # plain HTTP on the private network
+    token: ${BUILDER_TOKEN}
+    timeout_secs: 300
+
+auth:
+  enabled: true
+  auth_type: token
+  use_openapi_security: true
+  token:
+    keys:
+      - { value: "${STEPWISE_API_KEY}", subject: demo, roles: [admin] }
+
+logging:
+  level: info
+  format: json

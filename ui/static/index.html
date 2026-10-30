@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stepwise</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="login" class="overlay" data-testid="login">
+    <form id="login-form">
+      <h1>Stepwise</h1>
+      <p>Sign in with the UI token.</p>
+      <input id="token" type="password" autocomplete="current-password" aria-label="UI token" required>
+      <button type="submit" class="primary">Sign in</button>
+      <p id="login-error" class="error" role="alert" data-testid="login-error"></p>
+    </form>
+  </div>
+
+  <header id="top" hidden>
+    <strong class="brand">Stepwise</strong>
+    <nav id="nav"></nav>
+    <span class="spacer"></span>
+    <button id="logout" type="button">Sign out</button>
+  </header>
+  <div id="notices" aria-live="polite" data-testid="notices"></div>
+  <main id="view" data-testid="view"></main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
